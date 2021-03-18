@@ -1,0 +1,45 @@
+#---------------------------------------------------------------------------------------------------------------
+# build docker image package
+# ---
+# realiza los pasos generacion de imágenes docker, su etiquetado/versionado y publicación en ACR
+# este paso se ignora si el origen es un pull request, ya que solo es necesario validar
+#---------------------------------------------------------------------------------------------------------------
+
+parameters:
+- name: acrConnectionName
+  type: string
+- name: azureConnectionName
+  type: string
+- name: imageTag
+  type: string
+  default: "$(Build.BuildNumber)"
+ 
+stages:
+- stage: build
+  displayName: Build docker images
+  variables:
+    - group: pocmodapp-shared-poc
+    - group: pocmodapp-app-poc
+
+  jobs:
+  - template: job-build-docker.yml    
+    parameters:  
+      acrConnectionName: ${{ parameters.acrConnectionName }}
+      azureConnectionName: ${{ parameters.azureConnectionName }}
+      imageTag: ${{ parameters.imageTag }}
+      jobName: 'content_api'
+      imageRepositoryName: 'content-api'
+      dockerBuildContextPath: '$(Build.SourcesDirectory)/app/content-api/'
+      dockerfilePath: '$(Build.SourcesDirectory)/app/content-api/Dockerfile' 
+      helmChartfilePath: '$(Build.SourcesDirectory)/app/content-api/charts/api'
+
+  - template: job-build-docker.yml
+    parameters:  
+      acrConnectionName: ${{ parameters.acrConnectionName }}
+      azureConnectionName: ${{ parameters.azureConnectionName }}
+      imageTag: ${{ parameters.imageTag }}
+      jobName: 'content_web'
+      imageRepositoryName: 'content-web'
+      dockerBuildContextPath: '$(Build.SourcesDirectory)/app/content-web/'
+      dockerfilePath: '$(Build.SourcesDirectory)/app/content-web/Dockerfile' 
+      helmChartfilePath: '$(Build.SourcesDirectory)/app/content-web/charts/web'

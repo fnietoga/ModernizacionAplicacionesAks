@@ -1,0 +1,145 @@
+parameters:
+- name: azureServiceConnection
+  type: string
+- name: installCRDs
+  type: boolean
+  default: true
+
+stages:
+- stage: infra
+  displayName: "deploy infra" 
+  jobs:
+  - job: iac
+    displayName: "deploy azure infrastructure"
+    workspace:
+      clean: all
+    pool:
+      vmImage: 'ubuntu-20.04'
+    steps:
+    - checkout: self  
+
+    - script: |
+        curl -Lo bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64                  
+        chmod +x ./bicep                 
+        sudo mv ./bicep /usr/local/bin/bicep
+        bicep --help
+      displayName: Install Bicep
+
+    - script: |
+        bicep build ./iac/main.bicep
+      displayName: Bicep build ARM
+
+    - task: AzureCLI@2
+      displayName: "get execution context"
+      inputs:
+        azureSubscription: ${{ parameters.azureServiceConnection }}
+        scriptType: 'pscore'
+        scriptLocation: inlineScript
+        inlineScript: | 
+          $clientId = az account show --query user.name -o tsv
+          $spObjectId = az ad sp show --id $(az account show --query user.name -o tsv) --query objectId -o tsv
+
+          Write-Host "##vso[task.setvariable variable=CurrentDeploymentIdentityObjectId]$spObjectId"
+          Write-Host "Added Azure DevOps variable 'CurrentDeploymentIdentityObjectId' with value '$spObjectId"
+
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: 'Azure Deployment: AKS Infra on ${{ parameters.azureServiceConnection }}'
+      inputs:
+        deploymentScope: Subscription
+        ConnectedServiceName: ${{ parameters.azureServiceConnection }}
+        subscriptionId: $(SubscriptionId)
+        location: "$(Location)"
+        templateLocation: "Linked artifact"
+        csmFile: ./iac/main.json
+        deploymentName: AksPoc
+        addSpnToEnvironment: true
+        overrideParameters: -subscriptionId $(SubscriptionId) -currentDeploymentIdentityObjectId $(CurrentDeploymentIdentityObjectId) -vnetAddressPrefix $(VnetAddressPrefix) -subnetAddressPrefix $(SubnetAddressPrefix) -AADGroupClusterAdminsObjectId $(ClusterAdminsAadGroupId)
+
+  - job: clusterGlobal
+    displayName: "deploy global aks elements"
+    dependsOn: iac
+    workspace:
+      clean: all
+    pool:
+      vmImage: 'ubuntu-20.04'
+    steps:
+    - checkout: self
+    
+    - task: AzureKeyVault@1
+      displayName: Read infra values from KV
+      inputs:
+        azureSubscription: ${{ parameters.azureServiceConnection }}
+        KeyVaultName: $(KeyVaultName)
+        RunAsPreJob: true
+    
+    - script: |
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx --force-update  
+        helm repo add jetstack https://charts.jetstack.io --force-update  
+        helm repo update
+      displayName: 'helm add repos'
+
+    - task: HelmDeploy@0
+      displayName: "$(aks.ingressnamespace): helm install ingress controller"
+      inputs:
+        connectionType: 'Azure Resource Manager'
+        azureSubscriptionEndpoint: ${{ parameters.azureServiceConnection }}
+        azureResourceGroup: $(AksResourceGroupName)
+        kubernetesCluster: $(AksClusterName)
+        namespace: $(aks.ingressnamespace)
+        useClusterAdmin: true
+        command: upgrade    
+        chartType: Name
+        chartName: ingress-nginx/ingress-nginx
+        releaseName: ingress-nginx
+        install: true
+        force: false
+        waitForExecution: false
+        arguments: --create-namespace --set controller.replicaCount=2 --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-dns-label-name"="$(PublicIpDnsName)" --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux 
+    
+    - task: AzureCLI@2
+      displayName: "$(aks.ingressnamespace): kubectl label namespace for cert-manager"
+      inputs:
+        azureSubscription: ${{ parameters.azureServiceConnection }}
+        scriptType: 'pscore'
+        scriptLocation: inlineScript
+        inlineScript: | 
+          az aks get-credentials -g $(AksResourceGroupName) -n $(AksClusterName) --overwrite-existing -a
+          kubectl label namespace $(aks.ingressnamespace) cert-manager.io/disable-validation=true --overwrite
+
+    - task: HelmDeploy@0
+      displayName: "$(aks.ingressnamespace): helm install cert manager"
+      inputs:
+        connectionType: 'Azure Resource Manager'
+        azureSubscriptionEndpoint: ${{ parameters.azureServiceConnection }}
+        azureResourceGroup: $(AksResourceGroupName)
+        kubernetesCluster: $(AksClusterName)
+        namespace: $(aks.ingressnamespace)
+        useClusterAdmin: true
+        command: upgrade
+        chartType: Name
+        chartName: jetstack/cert-manager
+        releaseName: cert-manager
+        install: true
+        force: false
+        waitForExecution: false
+        arguments: --create-namespace --version v1.1.0 --set installCRDs=${{ parameters.installCRDs }} --set nodeSelector."beta\.kubernetes\.io/os"=linux
+
+    - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+      displayName: "replace tokens in global kubernetes manifests files"
+      inputs:
+        rootDirectory: '$(Build.SourcesDirectory)/iac/aks-global-manifests/'
+        targetFiles: '*.yaml'
+        tokenPrefix: '#{' 
+        tokenSuffix: '}#' 
+
+    - task: Kubernetes@1
+      displayName: "apply aks global manifests"
+      inputs:
+        connectionType: Azure Resource Manager
+        azureSubscriptionEndpoint: ${{ parameters.azureServiceConnection }}
+        azureResourceGroup: $(AksResourceGroupName)
+        kubernetesCluster: $(AksClusterName)
+        useClusterAdmin: true
+        command: apply
+        arguments: -f ./iac/aks-global-manifests --recursive 
+        outputFormat: json   

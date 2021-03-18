@@ -1,0 +1,84 @@
+#---------------------------------------------------------------------------------------------------------------
+# job creación de contenedor docker
+# ---
+# Crea una imagen docker a partir del fichero Dockerfile y la sube al Container Registry (ACR)
+#---------------------------------------------------------------------------------------------------------------
+
+parameters:
+- name: acrConnectionName
+  type: string
+- name: azureConnectionName
+  type: string
+- name: imageTag
+  type: string
+  default: "$(Build.BuildNumber)"
+- name: jobName
+  type: string
+- name: imageRepositoryName
+  type: string
+- name: dockerBuildContextPath
+  type: string
+- name: dockerfilePath
+  type: string
+- name: helmChartfilePath
+  type: string
+  default: ''
+- name: buildArguments
+  type: string
+  default: ''
+
+jobs:     
+- job: ${{ parameters.jobName }}
+  displayName: '${{ parameters.imageRepositoryName }}: build and push docker image'
+  pool: 
+    vmImage: 'ubuntu-20.04'
+  workspace:
+    clean: all     
+  steps:  
+  - task: AzureKeyVault@1
+    displayName: Read IaC values from KV
+    inputs:
+      azureSubscription: ${{ parameters.azureConnectionName }}
+      KeyVaultName: $(KeyVaultName)
+      RunAsPreJob: true
+
+  - task: Docker@2
+    displayName: docker login to repository
+    inputs:
+      command: login
+      containerRegistry: ${{ parameters.acrConnectionName }}
+
+  - task: Docker@2
+    displayName: '${{ parameters.imageRepositoryName }}: docker build with arguments'
+    inputs:
+      command: build
+      repository: ${{ parameters.imageRepositoryName }}
+      dockerfile: ${{ parameters.dockerfilePath }}
+      buildContext: ${{ parameters.dockerBuildContextPath }}
+      containerRegistry: ${{ parameters.acrConnectionName }}
+      arguments: ${{ parameters.buildArguments }}
+      tags: |
+        ${{ parameters.imageTag }}
+        latest
+
+  - task: Docker@2
+    displayName: '${{ parameters.imageRepositoryName }}: docker push image to repo'
+    inputs:
+      command: push
+      repository:  ${{ parameters.imageRepositoryName }}
+      dockerfile: ${{ parameters.dockerfilePath }}
+      containerRegistry: ${{ parameters.acrConnectionName }}           
+      tags: |
+        ${{ parameters.imageTag }}
+        latest
+
+  - task: HelmDeploy@0
+    displayName: '${{ parameters.imageRepositoryName }}: helm save chart to repo'
+    condition: ne('${{ parameters.helmChartfilePath }}', '')
+    inputs:
+      command: save
+      chartNameForACR: ${{ parameters.imageRepositoryName }}:${{ parameters.imageTag }}
+      chartPathForACR: ${{ parameters.helmChartfilePath }}
+      azureSubscriptionEndpointForACR: ${{ parameters.azureConnectionName }}
+      azureResourceGroupForACR: $(AcrResourceGroupName)
+      azureContainerRegistry: $(AcrFQDN)

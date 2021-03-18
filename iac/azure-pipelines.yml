@@ -1,0 +1,44 @@
+name: $(Build.DefinitionName)-$(SourceBranchName)-$(Date:yyyyMMdd).$(Rev:rr)
+trigger:
+  batch: true
+  branches:
+    include:
+      - master
+      - main
+      - iac/*
+  paths:
+    include: 
+      - iac/*
+    exclude:
+      - README.md
+      - iac/*.ps1
+
+parameters:
+- name: deployMonitoring
+  displayName: Deploy Monitoring?
+  type: boolean
+  default: true
+  
+variables:
+  - group: pocmodapp-shared-poc
+  - group: pocmodapp-infra-poc
+  - group: letsencrypt-fnietoga.me
+
+stages: 
+  - template: stage-iac.yml
+    parameters:
+      azureServiceConnection: 'FNIETO-AZUREARC'
+
+  - stage: grafana
+    displayName: "deploy grafana"
+    dependsOn: infra
+    condition: 
+      and
+      (
+        succeeded('infra'),
+        eq(${{ parameters.deployMonitoring }}, true)
+      )
+    jobs: 
+    - template: jobs-aks-grafana.yml
+      parameters: 
+        azureServiceConnection: 'FNIETO-AZUREARC'

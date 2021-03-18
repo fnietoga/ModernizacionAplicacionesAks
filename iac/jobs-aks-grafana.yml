@@ -1,0 +1,116 @@
+parameters:
+- name: azureServiceConnection
+  type: string
+
+jobs: 
+- job: deploygrafana
+  displayName: "deploy monitoring in aks"
+  workspace:
+    clean: all
+  pool:       
+    vmImage: 'ubuntu-20.04'
+  variables: 
+  - name: PublicIpAddress
+    value: ''
+  steps:
+  - checkout: self
+  
+  - task: AzureKeyVault@1
+    displayName: Read infra values from KV
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      KeyVaultName: $(KeyVaultName)
+      RunAsPreJob: true
+        
+  - script: |
+      helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update  
+      helm repo add grafana https://grafana.github.io/helm-charts --force-update  
+      helm repo update
+    displayName: 'helm add prometheus & grafana repositories' 
+  
+  - task: AzureCLI@2
+    displayName: "get execution context, to be used for grafana auth"
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: 'pscore'
+      scriptLocation: inlineScript
+      addSpnToEnvironment: true
+      failOnStandardError: false
+      inlineScript: | 
+        $clientId = az account show --query user.name -o tsv 
+        Write-Host "##vso[task.setvariable variable=CurrentDeploymentIdentityClientId]$clientId"
+        Write-Host "Added Azure DevOps variable 'CurrentDeploymentIdentityClientId' with value '$clientId" 
+
+        #store deployment service principal key -in base64 format- in a variable
+        Write-Host "##vso[task.setvariable variable=servicePrincipalSecret;isSecret=true]$env:servicePrincipalKey"
+        Write-Host "Added Azure DevOps variable 'servicePrincipalSecret' with value '$env:servicePrincipalKey'"
+
+  - task: AzureCLI@2
+    displayName: "get oms workspace id"
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: 'pscore'
+      scriptLocation: inlineScript
+      failOnStandardError: false
+      inlineScript: | 
+        $workspaceID = az monitor log-analytics workspace show -g $(OmsResourceGroupName) -n $(OmsWorkspaceName) --query customerId
+        Write-Host "##vso[task.setvariable variable=OmsWorkspaceId]$workspaceID"
+        Write-Host "Added Azure DevOps variable 'OmsWorkspaceId' with value '$workspaceID'"
+
+  - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+    displayName: "monitor: replace tokens in prometheus helm values"
+    inputs:
+      rootDirectory: '$(Build.SourcesDirectory)/iac/charts/prometheus/'
+      targetFiles: 'values.tokenized.yaml => values.yaml'
+      tokenPrefix: '#{' 
+      tokenSuffix: '}#'   
+
+  - task: HelmDeploy@0
+    displayName: helm deploy Prometheus to AKS
+    continueOnError: false 
+    inputs:
+      connectionType: Azure Resource Manager
+      azureSubscriptionEndpoint: ${{ parameters.azureServiceConnection }}
+      azureResourceGroup: $(AksResourceGroupName)
+      kubernetesCluster: $(AksClusterName)
+      useClusterAdmin: true
+      namespace: $(aks.monitoringnamespace)
+      command: upgrade
+      chartType: Name
+      chartName: prometheus-community/prometheus
+      valueFile: $(Build.SourcesDirectory)/iac/charts/prometheus/values.yaml
+      releaseName: prometheus
+      install: true
+      resetValues: false
+      force: false
+      waitForExecution: false
+      arguments: --create-namespace
+
+  - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+    displayName: "monitor: replace tokens in grafana helm values"
+    inputs:
+      rootDirectory: '$(Build.SourcesDirectory)/iac/charts/grafana/'
+      targetFiles: 'values.tokenized.yaml => values.yaml'
+      tokenPrefix: '#{' 
+      tokenSuffix: '}#'  
+
+  - task: HelmDeploy@0
+    displayName: helm deploy grafana to AKS
+    continueOnError: false
+    inputs:
+      connectionType: Azure Resource Manager
+      azureSubscriptionEndpoint: ${{ parameters.azureServiceConnection }}
+      azureResourceGroup: $(AksResourceGroupName)
+      kubernetesCluster: $(AksClusterName)
+      useClusterAdmin: true
+      namespace: $(aks.monitoringnamespace)
+      command: upgrade
+      chartType: Name
+      chartName: grafana/grafana
+      valueFile: $(Build.SourcesDirectory)/iac/charts/grafana/values.yaml
+      releaseName: grafana
+      install: true
+      resetValues: false
+      force: false
+      waitForExecution: false
+      arguments: --create-namespace 

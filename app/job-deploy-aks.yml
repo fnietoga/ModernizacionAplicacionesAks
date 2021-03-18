@@ -1,0 +1,97 @@
+
+#---------------------------------------------------------------------------------------------------------------
+# job despliegue de contenedor en aks
+# ---
+# despliega un contenedor docker en cluster AKS
+#---------------------------------------------------------------------------------------------------------------
+
+parameters:
+- name: environment
+  type: string
+- name: azureConnectionName
+  type: string
+- name: displayName
+  type: string
+- name: deployment
+  type: string
+- name: releaseName
+  type: string
+- name: imageRepositoryName
+  type: string 
+- name: chartName
+  type: string
+# - name: environmentTag
+#   type: string
+- name: aksNamespace
+  type: string
+
+
+jobs:
+- deployment: ${{ parameters.deployment }}
+  displayName: ${{ parameters.displayName }}
+  environment: 
+    name: ${{ parameters.environment }}
+    resourceType: Kubernetes
+    resourceName: poc
+    #tags: ${{ parameters.environmentTag }} 
+  strategy:
+    runOnce:
+      deploy:
+
+        steps:
+        - checkout: none
+
+        - task: HelmInstaller@1
+          displayName: "helm install"
+          inputs:
+            helmVersionToInstall: 3.3.3
+
+        - task: AzureKeyVault@1
+          displayName: Read IaC values from KV
+          inputs:
+            azureSubscription: ${{ parameters.azureConnectionName }}
+            KeyVaultName: $(KeyVaultName)
+            RunAsPreJob: true
+
+        - task: AzureCLI@2
+          displayName: "helm repo update"
+          env:
+            HELM_EXPERIMENTAL_OCI: 1
+          inputs:
+            azureSubscription: ${{ parameters.azureConnectionName }}
+            scriptType: bash
+            scriptLocation: inlineScript
+            addSpnToEnvironment: true
+            failOnStandardError: false
+            inlineScript: | 
+                helm version
+                set
+                #login helm to ACR repo
+                echo $servicePrincipalKey | helm registry login $(AcrFQDN) --username $servicePrincipalId  --password-stdin
+ 
+                # pull image lo local repository
+                helm chart pull $(AcrFQDN)/helm/${{ parameters.imageRepositoryName }}:$(Build.BuildNumber)
+                helm chart export $(AcrFQDN)/helm/${{ parameters.imageRepositoryName }}:$(Build.BuildNumber) --destination $(Build.ArtifactStagingDirectory)/install                 
+        
+        - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+          displayName: "Replace tokens in tokenized values file"
+          inputs:
+            rootDirectory: '$(Build.ArtifactStagingDirectory)/install/${{ parameters.chartName }}'
+            targetFiles: '*.tokenized.yaml => *.yaml'
+            tokenPrefix: '#{' 
+            tokenSuffix: '}#'
+            encoding: 'utf-8'
+            writeBOM: false 
+
+        - task: HelmDeploy@0
+          displayName: helm upgrade
+          inputs:
+            command: upgrade
+            namespace: ${{ parameters.aksNamespace }} 
+            chartType: FilePath
+            chartPath:  $(Build.ArtifactStagingDirectory)/install/${{ parameters.chartName }}
+            releaseName: ${{ parameters.releaseName }}
+            overrideValues: "image.tag=$(Build.BuildNumber)"
+            install: true
+            force: false
+            waitForExecution: false

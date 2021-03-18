@@ -1,0 +1,36 @@
+name: $(Build.DefinitionName)-$(SourceBranchName)-$(Date:yyyyMMdd).$(Rev:rr)
+trigger:
+  batch: true
+  branches:
+    include:
+      - master
+      - main
+      - app/*
+  paths:
+    include: 
+      - app/*
+    exclude:
+      - README.md
+      - app/*.ps1
+
+variables:
+  - group: pocmodapp-shared-poc
+  - group: pocmodapp-app-poc
+
+parameters:
+- name: deployPoc
+  displayName: Deploy on Poc?
+  type: boolean
+  default: true
+
+stages:
+
+- template: step-build-docker.yml
+  parameters:
+    acrConnectionName: "PocModAppAcr"
+    azureConnectionName: "FNIETO-AZUREARC"
+    imageTag: "$(Build.BuildNumber)" 
+
+- template: step-deploy-aks.yml
+  parameters:
+    deployPoc: ${{ parameters.deployPoc }}

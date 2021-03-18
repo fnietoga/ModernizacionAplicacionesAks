@@ -1,0 +1,48 @@
+
+#---------------------------------------------------------------------------------------------------------------
+# deploy aks dev
+# ---
+# control de despliegue en AKS para el entorno de dev
+#---------------------------------------------------------------------------------------------------------------
+
+
+parameters:
+- name: deployPoc
+  type: boolean
+  default: false
+
+stages:
+- stage: poc
+  displayName: 'Promote to Poc'
+  dependsOn: build
+  variables:
+    - group: pocmodapp-shared-poc
+    - group: pocmodapp-app-poc
+  condition:  
+     eq(${{ parameters.deployPoc }}, true)
+
+  jobs:
+    
+  - template: job-deploy-aks.yml
+    parameters:
+      environment: poc
+      azureConnectionName: 'FNIETO-AZUREARC'
+      displayName: 'api: deploy to aks'
+      deployment: api_deploy_aks
+      releaseName: pocmodapp-api
+      imageRepositoryName: content-api
+      chartName: api
+      # environmentTag: pocmodapp-api
+      aksNamespace: poc
+
+  - template: job-deploy-aks.yml
+    parameters:
+      environment: poc
+      azureConnectionName: 'FNIETO-AZUREARC'
+      displayName: 'web: deploy to aks'
+      deployment: web_deploy_aks
+      releaseName: pocmodapp-web
+      imageRepositoryName: content-web
+      chartName: web
+      # environmentTag: pocmodapp-web
+      aksNamespace: poc
